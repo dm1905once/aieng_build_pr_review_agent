@@ -3,17 +3,29 @@ import os
 from github import Github
 from github import GithubException
 from github import Auth
+from llama_index.llms.openai import OpenAI
+from llama_index.core.tools import FunctionTool
+from llama_index.core.agent.workflow import FunctionAgent
 
-# Initialize
+# == Initializations ==
 dotenv.load_dotenv()
-git = Github(auth=Auth.Token(os.getenv("GITHUB_TOKEN"))) if os.getenv("GITHUB_TOKEN") else None
 
+# Model
+llm = OpenAI(
+    model="gpt-4o-mini",
+    api_key=os.getenv("LITELLM_API_KEY"),
+    api_base=os.getenv("LITELLM_BASE_URL"),
+)
+
+# Github
+git = Github(auth=Auth.Token(os.getenv("GITHUB_TOKEN"))) if os.getenv("GITHUB_TOKEN") else None
 repo_url = "https://github.com/dm1905once/recipes-api.git"
 repo_name = repo_url.split('/')[-1].replace('.git', '')
 username = repo_url.split('/')[-2]
 full_repo_name = f"{username}/{repo_name}"
 
-# Functions
+
+# == Functions ==
 def get_pr_details(pull_number:int) -> str:
     """
     Provides details about a pull request (pr) given a pull request number
@@ -73,8 +85,21 @@ def get_pr_commit_details(commit_sha:str) -> list:
             })
         return changed_files
     except GithubException as e:
-        return "{'error': 'Unable to retrieve file contents'}"
+        return [{'error': 'Unable to retrieve file contents'}]
 
+# == Tool ==
+tools = [
+    FunctionTool.from_defaults(get_pr_details),
+    FunctionTool.from_defaults(get_file_contents),
+    FunctionTool.from_defaults(get_pr_commit_details)
+]
+
+# == Agent ==
+agent = FunctionAgent(
+    llm=llm,
+    name="MyAgent",
+    tools=tools
+)
 
 # print(get_pr_details(3))
 # print(get_file_contents("README.md"))
