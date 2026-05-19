@@ -1,11 +1,14 @@
 import dotenv
 import os
+import asyncio
 from github import Github
 from github import GithubException
 from github import Auth
 from llama_index.llms.openai import OpenAI
 from llama_index.core.tools import FunctionTool
-from llama_index.core.agent.workflow import FunctionAgent
+from llama_index.core.agent.workflow import ReActAgent, AgentOutput, ToolCallResult
+from llama_index.core.workflow import Context
+from llama_index.core.prompts import RichPromptTemplate
 
 # == Initializations ==
 dotenv.load_dotenv()
@@ -46,7 +49,6 @@ def get_pr_details(pull_number:int) -> str:
         for c in commits:
             commit_SHAs.append(c.sha)
         pr_details["commit_shas"] = commit_SHAs
-        git.close()
     except GithubException as e:
         pr_details['error'] = "Unable to retrieve PR details"
     return str(pr_details)
@@ -95,12 +97,32 @@ tools = [
 ]
 
 # == Agent ==
-agent = FunctionAgent(
+agent = ReActAgent(
     llm=llm,
-    name="MyAgent",
+    name="PR Review Agent",
     tools=tools
 )
 
-# print(get_pr_details(3))
-# print(get_file_contents("README.md"))
-# print(get_pr_commit_details("37c2f8e042bc874b1d497f299a7aee715ab5bb99"))
+# == Context ==
+context = Context(agent)
+
+# == Execution ==
+async def main():
+    query = input().strip()
+    prompt = RichPromptTemplate(query)
+    handler = agent.run(prompt.format(), ctx=context)
+
+    current_agent = None
+    async for event in handler.stream_events():
+        if hasattr(event, "current_agent_name") and event.current_agent_name != current_agent:
+            current_agent = event.current_agent_name
+            print(f"Current agent: {current_agent}")
+        elif isinstance(event, AgentOutput):
+            if event.response.content:
+                print(event.response.content)
+        elif isinstance(event, ToolCallResult):
+            print(f"Output from tool: {event.tool_output}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    git.close()
