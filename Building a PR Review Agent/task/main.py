@@ -97,9 +97,6 @@ async def add_context_to_state(context_summary:str):
     """
     async with context.store.edit_state() as state:
         state["context_summary"] = context_summary
-    # current_state = await context.store.get("state")
-    # current_state["context_summary"] = context_summary
-    # await context.store.set("state", current_state)
 
 async def add_comment_to_state(draft_comment:str):
     """
@@ -109,10 +106,7 @@ async def add_comment_to_state(draft_comment:str):
     """
     async with context.store.edit_state() as state:
         state["draft_comment"] = draft_comment
-    #context.store.get_state()["draft_comment"] = draft_comment
-    # current_state = await context.store.get("state")
-    # current_state["draft_comment"] = draft_comment
-    # await context.store.set("state", current_state)
+
 
 # == Tool ==
 tools = [
