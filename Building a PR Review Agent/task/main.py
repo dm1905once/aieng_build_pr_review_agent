@@ -6,7 +6,7 @@ from github import GithubException
 from github import Auth
 from llama_index.llms.openai import OpenAI
 from llama_index.core.tools import FunctionTool
-from llama_index.core.agent.workflow import ReActAgent, AgentOutput, ToolCallResult
+from llama_index.core.agent.workflow import AgentWorkflow, AgentOutput, ToolCall, ToolCallResult, FunctionAgent
 from llama_index.core.workflow import Context
 from llama_index.core.prompts import RichPromptTemplate
 
@@ -89,28 +89,94 @@ def get_pr_commit_details(commit_sha:str) -> list:
     except GithubException as e:
         return [{'error': 'Unable to retrieve file contents'}]
 
+async def add_context_to_state(context_summary:str):
+    """
+    Adds gathered context to the state
+    :param context_summary: Context summary after gathering the context
+    :return: None
+    """
+    async with context.store.edit_state() as state:
+        state["context_summary"] = context_summary
+    # current_state = await context.store.get("state")
+    # current_state["context_summary"] = context_summary
+    # await context.store.set("state", current_state)
+
+async def add_comment_to_state(draft_comment:str):
+    """
+    Adds review comments to the state
+    :param draft_comment: Review comment
+    :return: None
+    """
+    async with context.store.edit_state() as state:
+        state["draft_comment"] = draft_comment
+    #context.store.get_state()["draft_comment"] = draft_comment
+    # current_state = await context.store.get("state")
+    # current_state["draft_comment"] = draft_comment
+    # await context.store.set("state", current_state)
+
 # == Tool ==
 tools = [
     FunctionTool.from_defaults(get_pr_details),
     FunctionTool.from_defaults(get_file_contents),
-    FunctionTool.from_defaults(get_pr_commit_details)
+    FunctionTool.from_defaults(get_pr_commit_details),
+    FunctionTool.from_defaults(add_context_to_state)
 ]
 
-# == Agent ==
-agent = ReActAgent(
+# == Agents ==
+context_agent = FunctionAgent(
     llm=llm,
-    name="PR Review Agent",
-    tools=tools
+    name="ContextAgent",
+    description="Gathers all the needed context by commentor agent to draft pull requests comments.",
+    tools=tools,
+    can_handoff_to=["CommentorAgent"],
+    system_prompt="""
+        You are the context gathering agent. When gathering context, you MUST gather \n: 
+      - The details: author, title, body, diff_url, state, and commit_sha; \n
+      - Changed files; \n
+      - Any requested for files; \n
+        Once you gather the requested info, you MUST hand control back to the Commentor Agent. 
+    """
+)
+
+commentor_agent = FunctionAgent(
+    llm=llm,
+    name="CommentorAgent",
+    description="Uses the context gathered by the context agent to draft a pull review comment.",
+    tools=[FunctionTool.from_defaults(add_comment_to_state)],
+    can_handoff_to=["ContextAgent"],
+    system_prompt="""
+        You are the commentor agent that writes review comments for pull requests as a human reviewer would. \n 
+        Ensure to do the following for a thorough review: 
+         - Request for the PR details, changed files, and any other repo files you may need from the ContextAgent. 
+         - Once you have asked for all the needed information, write a good ~200-300 word review in markdown format detailing: \n
+            - What is good about the PR? \n
+            - Did the author follow ALL contribution rules? What is missing? \n
+            - Are there tests for new functionality? If there are new models, are there migrations for them? - use the diff to determine this. \n
+            - Are new endpoints documented? - use the diff to determine this. \n 
+            - Which lines could be improved upon? Quote these lines and offer suggestions the author could implement. \n
+         - If you need any additional details, you must hand off to the Context Agent. \n
+         - You should directly address the author. So your comments should sound like: \n
+         "Thanks for fixing this. I think all places where we call quote should be fixed. Can you roll this fix out everywhere?"
+    """
+)
+
+workflow_agent = AgentWorkflow(
+    agents=[context_agent, commentor_agent],
+    root_agent=commentor_agent.name,
+    initial_state={
+        "gathered_contexts": "",
+        "draft_comment": ""
+    },
 )
 
 # == Context ==
-context = Context(agent)
+context = Context(workflow_agent)
 
 # == Execution ==
 async def main():
     query = input().strip()
     prompt = RichPromptTemplate(query)
-    handler = agent.run(prompt.format(), ctx=context)
+    handler = workflow_agent.run(prompt.format())
 
     current_agent = None
     async for event in handler.stream_events():
@@ -119,9 +185,14 @@ async def main():
             print(f"Current agent: {current_agent}")
         elif isinstance(event, AgentOutput):
             if event.response.content:
-                print(event.response.content)
+                print("\\n\\nFinal response:", event.response.content)
+            if event.tool_calls:
+                print("Selected tools: ", [call.tool_name for call in event.tool_calls])
         elif isinstance(event, ToolCallResult):
             print(f"Output from tool: {event.tool_output}")
+        elif isinstance(event, ToolCall):
+            print(f"Calling selected tool: {event.tool_name}, with arguments: {event.tool_kwargs}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

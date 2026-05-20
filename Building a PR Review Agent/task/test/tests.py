@@ -7,11 +7,11 @@ from github import Github
 from github import GithubException
 from hstest import StageTest, CheckResult, dynamic_test, TestedProgram
 
+dotenv.load_dotenv()
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from main import repo_url
-
-dotenv.load_dotenv()
 
 
 class AgentTest(StageTest):
@@ -21,14 +21,6 @@ class AgentTest(StageTest):
     def check_url_set(self):
         if repo_url == "":
             return CheckResult.wrong("The URL in main.py is not set.")
-        pattern = r"^https://(api\.)?github\.com/(repos\/)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$"
-        if not re.match(pattern, repo_url):
-            return CheckResult.wrong(
-                "Your `repo_url` must be of the form "
-                "`https://github.com/username/repo.git` or `https://api.github.com/repos/username/repo.git`."
-            )
-        if self.g is None:
-            return CheckResult.wrong("Please add the GitHub PAT you created in your .env file. ")
         return CheckResult.correct()
 
     @dynamic_test(time_limit=0)
@@ -36,19 +28,21 @@ class AgentTest(StageTest):
         if self.g is None:
             return CheckResult.wrong("GitHub token is not set. in environment")
 
-        repo_name = repo_url.split('/')[-1].replace('.git', '')
+        repo_name = repo_url.split('/')[-1].replace('.git', '')  # Remove .git if present
         username = repo_url.split('/')[-2]
         full_repo_name = f"{username}/{repo_name}"
 
         try:
+            # Call get_repo once and store the result
             repo = self.g.get_repo(full_repo_name)
+
             if repo.private:
                 return CheckResult.wrong("The repository is private. Make sure it's public.")
-            
+
             expected_files = {"README.md", ".gitignore", "app/models.py", "app/tests/test_views.py",
                               "pyproject.toml", "CONTRIBUTING.md", "app/views.py", "recipes/settings.py",
                               ".github/workflows/ci.yml", "manage.py"}
-            
+
             repo_contents = set()
 
             def check_directory_contents(contents_url, path=""):
@@ -82,19 +76,71 @@ class AgentTest(StageTest):
                     f"The PR must modify the following files: {missing_str}. Found: {modified_files}")
 
             pr_number = latest_pull.number
-            changed_files = ['app/models.py', 'app/serializers.py']
-
             program = TestedProgram("main.py")
             program.start()
-            output = program.execute(f"Which files changed in pull request number {pr_number}?")
-            if not re.search(rf"Current agent:\s*.*Agent", output):
+            output = program.execute(f"Write a review for PR number {pr_number}")
+
+            if not re.search(r"Current agent:\s*.*Agent", output):
                 return CheckResult.wrong(
-                    "Agent name declaration missing from the output. Did you invoke the agent as instructed?")
-            for cf in changed_files:
-                esc = re.escape(cf)
-                if not re.search(rf"{esc}", output):
-                    return CheckResult.wrong(f"Your agent couldn't find the following changed file(s): `{cf}`"
-                                             f"Check your PR and changed files retrieval mechanism.")
+                    "Agent name declaration missing or malformed. Did you invoke the agent as instructed?")
+
+            if not re.search(r"Selected tools:\s*\[[^\]]+\]", output):
+                return CheckResult.wrong("No selected tools list found or it is empty.")
+
+            tool_calls = re.findall(r"Calling selected tool: (\w+), with arguments: (\{.*?\})", output)
+            if len(tool_calls) < 1:
+                return CheckResult.wrong("No tool invocation logs found.")
+
+            if not re.search(r"Output from tool: \{[^}]*'title': '[^']+'", output):
+                return CheckResult.wrong("PR details output missing title field.")
+            if not re.search(r"'body': '[^']+'", output):
+                return CheckResult.wrong("PR details output missing body field.")
+            if not re.search(r"Output from tool: \[\{[^}]*'filename': '[^']+'", output):
+                return CheckResult.wrong("Changed files output missing file entries. Check your changed files tool. ")
+
+            if len(tool_calls) < 5:
+                return CheckResult.wrong("Expected multiple tool invocation logs, found fewer.")
+
+            if not re.search(r"Selected tools:\s*\['handoff'\]", output):
+                return CheckResult.wrong("Hand-off not found. Ensure your agents are passing control to each other.")
+            if not re.search(
+                    r"Calling selected tool: handoff, with arguments:\s*\{[^}]*'to_agent':\s*'CommentorAgent'",
+                    output
+            ):
+                return CheckResult.wrong("Handoff call to CommentorAgent is missing. Did you properly orchestrate the"
+                                         "workflow with AgentWorkflow?")
+
+            if not re.search(
+                    r"Calling selected tool: handoff, with arguments:\s*\{[^}]*'to_agent':\s*'ContextAgent'",
+                    output
+            ):
+                return CheckResult.wrong("Handoff call to ContextAgent is missing. Did you properly orchestrate the"
+                                         "workflow with AgentWorkflow?")
+
+            if not re.search(
+                    r"Output from tool: Agent CommentorAgent is now handling the request due to the following reason:",
+                    output
+            ):
+                return CheckResult.wrong(
+                    "Handoff tool’s output to CommentorAgent is missing. Did you properly orchestrate the"
+                    "workflow with AgentWorkflow?")
+            if not re.search(
+                    r"Output from tool: Agent ContextAgent is now handling the request due to the following reason:",
+                    output
+            ):
+                return CheckResult.wrong(
+                    "Handoff tool’s output to ContextAgent is missing. Did you properly orchestrate the"
+                    "workflow with AgentWorkflow?")
+
+            agents = re.findall(r"Current agent:\s*(\w+)", output)
+            unique_agents = set(agents)
+            needed = {'ContextAgent', 'CommentorAgent'}
+            if not needed.issubset(unique_agents):
+                return CheckResult.wrong(
+                    f"Expected Current agent declarations for both ContextAgent and CommentorAgent; "
+                    f"found: {unique_agents}"
+                )
+
             return CheckResult.correct()
 
         except GithubException as e:
@@ -105,25 +151,6 @@ class AgentTest(StageTest):
                     f"An error occurred while accessing the repository: {e.data.get('message', 'No error message')}")
         except Exception as e:
             return CheckResult.wrong(f"An unexpected error occurred: {e}")
-
-    @dynamic_test(time_limit=0)
-    def test3_check_file_retrieval_mechanism(self):
-        program = TestedProgram()
-        program.start()
-        output = program.execute("What are the contents of the pytest.ini file?")
-        required_patterns = [
-            r"\[pytest\]",
-            r"DJANGO_SETTINGS_MODULE\s*=\s*recipes\.settings",
-            r"python_files\s*=\s*tests_\*\.py\s+test_\*\.py\s+\*_tests\.py\s+tests\.py",
-        ]
-        missing = [
-            pat for pat in required_patterns
-            if not re.search(pat, output)
-        ]
-
-        if missing:
-            return CheckResult.wrong("Your agent couldn't retrieve the contents of a specific file.")
-        return CheckResult.correct()
 
 
 if __name__ == '__main__':
