@@ -107,13 +107,30 @@ async def add_comment_to_state(draft_comment:str):
     async with context.store.edit_state() as state:
         state["draft_comment"] = draft_comment
 
+async def add_review_to_state(final_review:str):
+    """
+    Adds final review to the state
+    :param final_review: Final and reviewed comment
+    :return: None
+    """
+    async with context.store.edit_state() as state:
+        state["final_review"] = final_review
+
+def post_review_to_github(pr_number: int, comment:str):
+    try:
+        repo = git.get_repo(full_repo_name)
+        repo.get_pull(pr_number).create_review(comment)
+    except GithubException as e:
+        return [{'error': 'Unable to retrieve pull review or post comment'}]
+
 
 # == Tool ==
 tools = [
     FunctionTool.from_defaults(get_pr_details),
     FunctionTool.from_defaults(get_file_contents),
     FunctionTool.from_defaults(get_pr_commit_details),
-    FunctionTool.from_defaults(add_context_to_state)
+    FunctionTool.from_defaults(add_context_to_state),
+    FunctionTool.from_defaults(add_review_to_state)
 ]
 
 # == Agents ==
@@ -150,7 +167,8 @@ commentor_agent = FunctionAgent(
             - Which lines could be improved upon? Quote these lines and offer suggestions the author could implement. \n
          - If you need any additional details, you must hand off to the Context Agent. \n
          - You should directly address the author. So your comments should sound like: \n
-         "Thanks for fixing this. I think all places where we call quote should be fixed. Can you roll this fix out everywhere?"
+            "Thanks for fixing this. I think all places where we call quote should be fixed. Can you roll this fix out everywhere?"
+         - You must hand off to the ReviewAndPostingAgent once you are done drafting a review. 
     """
 )
 
@@ -159,7 +177,8 @@ workflow_agent = AgentWorkflow(
     root_agent=commentor_agent.name,
     initial_state={
         "gathered_contexts": "",
-        "draft_comment": ""
+        "draft_comment": "",
+        "final_review": ""
     },
 )
 
