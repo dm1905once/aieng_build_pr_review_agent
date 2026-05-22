@@ -12,5 +12,8 @@ files:
   - name: tests.py
     learner_created: false
 feedback_link: https://hyperskill.org/projects/528/stages/3082/implement#comment
-status: Unchecked
+status: Failed
+feedback:
+  message: "Wrong answer in test #3"
+  time: "Fri, 22 May 2026 05:06:40 UTC"
 record: -1

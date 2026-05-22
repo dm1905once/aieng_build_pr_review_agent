@@ -116,12 +116,19 @@ async def add_review_to_state(final_review:str):
     async with context.store.edit_state() as state:
         state["final_review"] = final_review
 
-def post_review_to_github(pr_number: int, comment:str):
+def post_review_to_github(pr_number: int, comment:str) -> list:
+    """
+    Takes a final comment and posts it to the GitHub API
+    :param pr_number: pull request number to add the comment to
+    :param comment: final comment to add to the pull request
+    :return:
+    """
     try:
         repo = git.get_repo(full_repo_name)
-        repo.get_pull(pr_number).create_review(comment)
+        review = repo.get_pull(pr_number).create_review(body=comment)
+        return [{'success': 'Review posted successfully'}]
     except GithubException as e:
-        return [{'error': 'Unable to retrieve pull review or post comment'}]
+        return [{'error': {e.data.get('message')} }]
 
 
 # == Tool ==
@@ -154,7 +161,7 @@ commentor_agent = FunctionAgent(
     name="CommentorAgent",
     description="Uses the context gathered by the context agent to draft a pull review comment.",
     tools=[FunctionTool.from_defaults(add_comment_to_state)],
-    can_handoff_to=["ContextAgent"],
+    can_handoff_to=["ContextAgent", "ReviewAndPostingAgent"],
     system_prompt="""
         You are the commentor agent that writes review comments for pull requests as a human reviewer would. \n 
         Ensure to do the following for a thorough review: 
@@ -172,9 +179,31 @@ commentor_agent = FunctionAgent(
     """
 )
 
+review_and_posting_agent = FunctionAgent(
+    llm=llm,
+    name="ReviewAndPostingAgent",
+    description="Checks the draft pull review and if valid then it posts it to GitHub.",
+    tools=[FunctionTool.from_defaults(add_review_to_state),
+           FunctionTool.from_defaults(post_review_to_github)],
+    can_handoff_to=["CommentorAgent"],
+    system_prompt="""
+        You are the Review and Posting agent. You must use the CommentorAgent to create a review comment. 
+        Once a review is generated, you need to run a final check and post it to GitHub.
+           - The review must: \n
+           - Be a ~200-300 word review in markdown format. \n
+           - Specify what is good about the PR: \n
+           - Did the author follow ALL contribution rules? What is missing? \n
+           - Are there notes on test availability for new functionality? If there are new models, are there migrations for them? \n
+           - Are there notes on whether new endpoints were documented? \n
+           - Are there suggestions on which lines could be improved upon? Are these lines quoted? \n
+         If the review does not meet this criteria, you must ask the CommentorAgent to rewrite and address these concerns. \n
+         When you are satisfied, post the review to GitHub.  
+    """
+)
+
 workflow_agent = AgentWorkflow(
-    agents=[context_agent, commentor_agent],
-    root_agent=commentor_agent.name,
+    agents=[context_agent, commentor_agent, review_and_posting_agent],
+    root_agent=review_and_posting_agent.name,
     initial_state={
         "gathered_contexts": "",
         "draft_comment": "",
