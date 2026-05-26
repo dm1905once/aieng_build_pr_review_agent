@@ -39,16 +39,12 @@ def get_pr_details(pull_number:int) -> str:
     try:
         repo = git.get_repo(full_repo_name)
         pull = repo.get_pull(pull_number)
-        pr_details["repo_name"] = full_repo_name
         pr_details["author"] = pull.user.login
         pr_details["title"] = pull.title
         pr_details["body"] = pull.body
+        pr_details["state"] = pull.state
         pr_details["diff_url"] = pull.diff_url
-        commit_SHAs = []
-        commits = pull.get_commits()
-        for c in commits:
-            commit_SHAs.append(c.sha)
-        pr_details["commit_shas"] = commit_SHAs
+        pr_details['head_sha'] = pull.head.sha
     except GithubException as e:
         pr_details['error'] = "Unable to retrieve PR details"
     return str(pr_details)
@@ -148,8 +144,8 @@ context_agent = FunctionAgent(
     tools=tools,
     can_handoff_to=["CommentorAgent"],
     system_prompt="""
-        You are the context gathering agent. When gathering context, you MUST gather \n: 
-      - The details: author, title, body, diff_url, state, and commit_sha; \n
+        You are the context gathering agent. When gathering context, you MUST call the get_pr_details first to gather: \n: 
+      - The PR details: author, title, body, diff_url, state, and head_sha; \n
       - Changed files; \n
       - Any requested for files; \n
         Once you gather the requested info, you MUST hand control back to the Commentor Agent. 
@@ -165,7 +161,7 @@ commentor_agent = FunctionAgent(
     system_prompt="""
         You are the commentor agent that writes review comments for pull requests as a human reviewer would. \n 
         Ensure to do the following for a thorough review: 
-         - Request for the PR details, changed files, and any other repo files you may need from the ContextAgent. 
+         - Call the ContextAgent to request the PR details, changed files, and any other repo files you may need, and wait for the results. 
          - Once you have asked for all the needed information, write a good ~200-300 word review in markdown format detailing: \n
             - What is good about the PR? \n
             - Did the author follow ALL contribution rules? What is missing? \n
