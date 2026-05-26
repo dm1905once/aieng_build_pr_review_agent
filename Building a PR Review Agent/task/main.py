@@ -29,7 +29,7 @@ full_repo_name = f"{username}/{repo_name}"
 
 
 # == Functions ==
-def get_pr_details(pull_number:int) -> str:
+def get_pr_details(pull_number:int) -> dict:
     """
     Provides details about a pull request (pr) given a pull request number
     :param pull_number: pull request number
@@ -39,15 +39,15 @@ def get_pr_details(pull_number:int) -> str:
     try:
         repo = git.get_repo(full_repo_name)
         pull = repo.get_pull(pull_number)
-        pr_details["author"] = pull.user.login
-        pr_details["title"] = pull.title
-        pr_details["body"] = pull.body
-        pr_details["state"] = pull.state
-        pr_details["diff_url"] = pull.diff_url
+        pr_details['author'] = pull.user.login
+        pr_details['title'] = pull.title
+        pr_details['body'] = pull.body
+        pr_details['state'] = pull.state
+        pr_details['diff_url'] = pull.diff_url
         pr_details['head_sha'] = pull.head.sha
+        return pr_details
     except GithubException as e:
-        pr_details['error'] = "Unable to retrieve PR details"
-    return str(pr_details)
+        raise ValueError(f"An error occurred while accessing the repository: {e.data.get('message', 'No error message')}")
 
 def get_file_contents(path:str) -> str:
     """
@@ -71,19 +71,20 @@ def get_pr_commit_details(commit_sha:str) -> list:
     try:
         repo = git.get_repo(full_repo_name)
         commit = repo.get_commit(commit_sha)
-        changed_files: list[dict[str, Any]] = []
-        for f in commit.files:
+        changed_files: list[dict] = []
+        # for f in commit.files:
+        for f in commit.get_files():
             changed_files.append({
                 "filename": f.filename,
                 "status": f.status,
                 "additions": f.additions,
                 "deletions": f.deletions,
                 "changes": f.changes,
-                "patch": f.patch,
+                "patch": f.patch
             })
         return changed_files
     except GithubException as e:
-        return [{'error': 'Unable to retrieve file contents'}]
+        return [{'error': 'Unable to retrieve commit details'}]
 
 async def add_context_to_state(context_summary:str):
     """
@@ -132,6 +133,7 @@ tools = [
     FunctionTool.from_defaults(get_pr_details),
     FunctionTool.from_defaults(get_file_contents),
     FunctionTool.from_defaults(get_pr_commit_details),
+    FunctionTool.from_defaults(add_comment_to_state),
     FunctionTool.from_defaults(add_context_to_state),
     FunctionTool.from_defaults(add_review_to_state)
 ]
@@ -141,10 +143,13 @@ context_agent = FunctionAgent(
     llm=llm,
     name="ContextAgent",
     description="Gathers all the needed context by commentor agent to draft pull requests comments.",
-    tools=tools,
+    tools=[FunctionTool.from_defaults(get_pr_details),
+           FunctionTool.from_defaults(get_pr_commit_details),
+           FunctionTool.from_defaults(add_context_to_state),
+           FunctionTool.from_defaults(get_file_contents)],
     can_handoff_to=["CommentorAgent"],
     system_prompt="""
-        You are the context gathering agent. When gathering context, you MUST call the get_pr_details first to gather: \n: 
+        You are the context agent. You MUST call the get_pr_details tool providing the PR number to gather: \n: 
       - The PR details: author, title, body, diff_url, state, and head_sha; \n
       - Changed files; \n
       - Any requested for files; \n
@@ -159,19 +164,24 @@ commentor_agent = FunctionAgent(
     tools=[FunctionTool.from_defaults(add_comment_to_state)],
     can_handoff_to=["ContextAgent", "ReviewAndPostingAgent"],
     system_prompt="""
-        You are the commentor agent that writes review comments for pull requests as a human reviewer would. \n 
-        Ensure to do the following for a thorough review: 
-         - Call the ContextAgent to request the PR details, changed files, and any other repo files you may need, and wait for the results. 
+        You are the commentor agent in charge of drafting a comment of a PR as a human reviewer would. \n 
+        You MUST call the ContextAgent to request: \n
+         - the PR details, 
+         - commit details to obtain the changed files, 
+         - file contents and 
+         - any other repo files you may need, 
+        and wait for the results.
+        Do not handoff until calling the ContextAgent for the PR details.
+        After obtaining the PR context from the ContextAgent, ensure to do the following for a thorough review: 
          - Once you have asked for all the needed information, write a good ~200-300 word review in markdown format detailing: \n
             - What is good about the PR? \n
             - Did the author follow ALL contribution rules? What is missing? \n
             - Are there tests for new functionality? If there are new models, are there migrations for them? - use the diff to determine this. \n
             - Are new endpoints documented? - use the diff to determine this. \n 
             - Which lines could be improved upon? Quote these lines and offer suggestions the author could implement. \n
-         - If you need any additional details, you must hand off to the Context Agent. \n
          - You should directly address the author. So your comments should sound like: \n
             "Thanks for fixing this. I think all places where we call quote should be fixed. Can you roll this fix out everywhere?"
-         - You must hand off to the ReviewAndPostingAgent once you are done drafting a review. 
+        Once you have enough information about the PR, after calling the ContextAgent at least twice, you must hand off to the ReviewAndPostingAgent. 
     """
 )
 
@@ -204,7 +214,7 @@ workflow_agent = AgentWorkflow(
         "gathered_contexts": "",
         "draft_comment": "",
         "final_review": ""
-    },
+    }
 )
 
 # == Context ==
