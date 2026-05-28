@@ -1,11 +1,11 @@
 import os
-import re
 import sys
 
 import dotenv
+import yaml
 from github import Github
 from github import GithubException
-from hstest import StageTest, CheckResult, dynamic_test, TestedProgram
+from hstest import StageTest, CheckResult, dynamic_test
 
 dotenv.load_dotenv()
 
@@ -21,7 +21,19 @@ class AgentTest(StageTest):
     username = repo_url.split('/')[-2]
     full_repo_name = f"{username}/{repo_name}"
     repo = g.get_repo(full_repo_name)
-    pull_requests = repo.get_pulls(state="open", sort="newest")
+    pull_requests = repo.get_pulls(state="open", sort="created")
+
+    @classmethod
+    def handle_github_exception(cls, e):
+        if e.status == 404:
+            return CheckResult.wrong("The requested resource does not exist.")
+        elif e.status == 403:
+            return CheckResult.wrong("Access to the resource is forbidden or rate limit exceeded.")
+        elif e.status == 401:
+            return CheckResult.wrong("Authentication is required or has failed.")
+        else:
+            return CheckResult.wrong(
+                f"An error occurred while accessing the GitHub repository: {e.data.get('message', 'No error message')}")
 
     @dynamic_test
     def check_url_set(self):
@@ -38,7 +50,9 @@ class AgentTest(StageTest):
                 return CheckResult.wrong("The repository is private. Make sure it's public.")
 
             expected_files = {"README.md", ".gitignore", "app/models.py", "app/tests/test_views.py",
-                              "pyproject.toml", "CONTRIBUTING.md", "app/views.py", "recipes/settings.py", "manage.py"}
+                              "pyproject.toml", "CONTRIBUTING.md", "app/views.py", "recipes/settings.py",
+                              "manage.py", "agent.py", ".github/workflows/ci.yml"
+                              }
 
             repo_contents = set()
 
@@ -82,93 +96,87 @@ class AgentTest(StageTest):
         except Exception as e:
             return CheckResult.wrong(f"An unexpected error occurred: {e}")
 
-    @dynamic_test(time_limit=0)
-    def test3_agent_and_tool_invocation(self):
-        if self.pull_requests.totalCount == 0:
-            return CheckResult.wrong("No open pull requests found — please open one with the specified changes "
-                                     "to app/models.py and app/serializers.py in a new branch. ")
-        pr_number = self.pull_requests[0].number
-        program = TestedProgram("main.py")
-        program.start()
-        output = program.execute(f"Post a review for PR number {pr_number} to GitHub.")
+    @dynamic_test
+    def check_script_file_contents(self):
+        try:
+            contents = self.repo.get_contents("agent.py")
+            if not contents:
+                return CheckResult.wrong("The file 'agent.py' does not exist.")
+            if not contents.decoded_content:
+                return CheckResult.wrong("The file 'agent.py' is empty.")
+            return CheckResult.correct()
+        except GithubException as e:
+            return self.handle_github_exception(e)
+        except Exception as e:
+            return CheckResult.wrong(f"Something went wrong. Encountered: {e}")
 
-        if not re.search(r"Current agent:\s*.*Agent", output):
-            return CheckResult.wrong(
-                "Agent name declaration missing or malformed. Did you invoke the agent as instructed?")
+    @dynamic_test
+    def check_main_file_exists(self):
+        try:
+            files = self.repo.get_contents(".github/workflows")
+            main_yaml_file_exists = any(
+                file.path == ".github/workflows/ci.yml" or file.path == ".github/workflows/ci.yaml" for
+                file in files)
+            if not main_yaml_file_exists:
+                return CheckResult.wrong(f"The ci.yml file does not exist in the .github/workflows/ directory.")
+            return CheckResult.correct()
+        except GithubException as e:
+            return self.handle_github_exception(e)
+        except Exception as e:
+            return CheckResult.wrong(f"Something went wrong. Encountered: {e}")
 
-        if not re.search(r"Selected tools:\s*\[[^\]]+\]", output):
-            return CheckResult.wrong("No selected tools list found or it is empty.")
+    @dynamic_test
+    def check_workflow_manifest(self):
+        try:
+            contents = self.repo.get_contents(".github/workflows/ci.yml") or self.repo.get_contents(
+                ".github/workflows/ci.yaml")
 
-        tool_calls = re.findall(r"Calling selected tool: (\w+), with arguments: (\{.*?\})", output)
-        if len(tool_calls) < 1:
-            return CheckResult.wrong("No tool invocation logs found.")
+            workflow_file = contents.decoded_content.decode()
+            new_workflow = yaml.load(workflow_file, Loader=yaml.BaseLoader)
 
-        if not re.search(r"Output from tool: \{[^}]*'title': '[^']+'", output):
-            return CheckResult.wrong("PR details output missing title field.")
-        if not re.search(r"'body': '[^']+'", output):
-            return CheckResult.wrong("PR details output missing body field.")
-        if not re.search(r"Output from tool: \[\{[^}]*'filename': '[^']+'", output):
-            return CheckResult.wrong("Changed files output missing file entries. Check your changed files tool. ")
+            jobs = new_workflow.get("jobs")
+            if not jobs:
+                return CheckResult.wrong("The workflow does not have a job.")
 
-        if len(tool_calls) < 5:
-            return CheckResult.wrong("Expected multiple tool invocation logs, found fewer.")
+            job_name, job = next(iter(jobs.items()), (None, None))
 
-        if not re.search(r"Selected tools:\s*\['handoff'\]", output):
-            return CheckResult.wrong("Hand-off not found. Ensure your agents are passing control to each other.")
-        if not re.search(
-                r"Calling selected tool: handoff, with arguments:\s*\{[^}]*'to_agent':\s*'CommentorAgent'",
-                output
-        ):
-            return CheckResult.wrong("Handoff call to CommentorAgent is missing. Did you properly orchestrate the"
-                                     "workflow with AgentWorkflow?")
+            if not job or job.get("runs-on") != "ubuntu-latest":
+                return CheckResult.wrong("The job does not run on 'ubuntu-latest' runner or is missing.")
 
-        if not re.search(
-                r"Calling selected tool: handoff, with arguments:\s*\{[^}]*'to_agent':\s*'ReviewAndPostingAgent'",
-                output
-        ):
-            return CheckResult.wrong(
-                "Handoff call to ReviewAndPostingAgent is missing. Did you properly orchestrate the"
-                "workflow with AgentWorkflow?")
+            if not any(job.get("permissions")):
+                return CheckResult.wrong("The job does not have permissions. Did you modify the original workflow?")
 
-        if not re.search(
-                r"Calling selected tool: handoff, with arguments:\s*\{[^}]*'to_agent':\s*'ContextAgent'",
-                output
-        ):
-            return CheckResult.wrong("Handoff call to ContextAgent is missing. Did you properly orchestrate the"
-                                     "workflow with AgentWorkflow?")
+            steps = job.get("steps", [])
 
-        if not re.search(
-                r"Output from tool: Agent CommentorAgent is now handling the request due to the following reason:",
-                output
-        ):
-            return CheckResult.wrong(
-                "Handoff tool’s output to CommentorAgent is missing. Did you properly orchestrate the"
-                "workflow with AgentWorkflow?")
-        if not re.search(
-                r"Output from tool: Agent ReviewAndPostingAgent is now handling the request due to the following reason:",
-                output
-        ):
-            return CheckResult.wrong(
-                "Handoff tool’s output to ReviewAndPostingAgent is missing. Did you properly orchestrate the"
-                "workflow with AgentWorkflow?")
-        if not re.search(
-                r"Output from tool: Agent ContextAgent is now handling the request due to the following reason:",
-                output
-        ):
-            return CheckResult.wrong(
-                "Handoff tool’s output to ContextAgent is missing. Did you properly orchestrate the"
-                "workflow with AgentWorkflow?")
+            expected_steps = {
+                "checkout_repository": r"actions/checkout@v",
+                "set_up_python": "actions/setup-python@v",
+                "run_the_agent": "poetry run python agent.py $"
+            }
+            for step_name, expected_value in expected_steps.items():
+                if not any(step.get("run", "").startswith(expected_value) or step.get("uses", "").startswith(
+                        expected_value) for step in steps):
+                    return CheckResult.wrong(f"The job does not have a step to {step_name.replace('_', ' ')}.")
+            return CheckResult.correct()
+        except GithubException as e:
+            return self.handle_github_exception(e)
+        except Exception as e:
+            return CheckResult.wrong(f"Something went wrong. Encountered: {e}")
 
-        agents = re.findall(r"Current agent:\s*(\w+)", output)
-        unique_agents = set(agents)
-        needed = {'ContextAgent', 'CommentorAgent', 'ReviewAndPostingAgent'}
-        if not needed.issubset(unique_agents):
-            return CheckResult.wrong(
-                f"Expected Current agent declarations for both ContextAgent and CommentorAgent; "
-                f"found: {unique_agents}"
-            )
+    @dynamic_test
+    def check_workflow_run_on_prs(self):
+        try:
+            latest_workflow_run = list(self.repo.get_workflow_runs().get_page(0))[0]
+            if latest_workflow_run.event != "pull_request":
+                return CheckResult.wrong(f"The latest workflow run was not triggered by an PR event.")
+            if latest_workflow_run.conclusion != "success":
+                return CheckResult.wrong(f"The latest workflow run did not succeed.")
 
-        return CheckResult.correct()
+            return CheckResult.correct()
+        except GithubException as e:
+            return self.handle_github_exception(e)
+        except Exception as e:
+            return CheckResult.wrong(f"Something went wrong. Encountered: {e}")
 
     @dynamic_test(time_limit=0)
     def test4_check_latest_pr_comment(self):
@@ -183,16 +191,16 @@ class AgentTest(StageTest):
         reviews = pr.get_reviews()
 
         if comments.totalCount == 0:
-            return CheckResult.wrong("Test results from workflow not found. Ensure that you didn't modify and that you committed the .github/workflows/ci.yml file.")
+            return CheckResult.wrong("Test results from workflow not found. Did you modify the original code?")
         if reviews.totalCount == 0:
-            return CheckResult.wrong("No review comments found. Ensure that your agent is posting the comments back to GitHub. ")
-        found_comment_author = any(comment.user.login == "github-actions[bot]" for comment in comments)
-        if not found_comment_author:
-            return CheckResult.wrong("There should be at least one issue comment created when you opened a new PR containing the test results.")
-        pr_author = pr.user.login
-        found = any(review.user.login == pr_author for review in reviews)
+            return CheckResult.wrong(
+                "No review comments found. Ensure that your agent is posting the comments back to GitHub. ")
+
+        found = any(review.user.login == "github-actions[bot]" for review in reviews)
         if not found:
-            return CheckResult.wrong("The review should have been posted by the agent using your account credentials.")
+            return CheckResult.wrong(
+                "No review was posted by GitHub Actions. Ensure your workflow is working as expected.")
+
         return CheckResult.correct()
 
 

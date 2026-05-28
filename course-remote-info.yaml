@@ -4,7 +4,7 @@ hyperskill_project:
   is_template_based: false
   use_ide: true
   environment: unittest
-update_date: "Tue, 26 May 2026 01:12:59 UTC"
+update_date: "Thu, 28 May 2026 13:48:20 UTC"
 stages:
   - id: 3079
     step: 52411
@@ -20,7 +20,7 @@ stages:
     is_completed: true
   - id: 3083
     step: 52415
-    is_completed: false
+    is_completed: true
 topics:
   0:
     - title: Introduction to LLMs
